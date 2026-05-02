@@ -4227,7 +4227,7 @@ async function txdotLoadDefaultDistricts() {
     txdotRenderList();
     txdotHasLoaded = true;
     if (layersOn.cameras && camMarkerLayer && !map.hasLayer(camMarkerLayer)) camMarkerLayer.addTo(map);
-    txdotFitToCameraBounds();
+    txdotApplyFilter();
     txdotSetLoading(failed.length ? `LOADED WITH ERRORS: ${failed.join(', ')}` : 'CAMERA LAYER READY', 100, true);
     setTimeout(() => txdotSetLoading('CAMERA LAYER READY', 100, false), failed.length ? 2800 : 900);
   } catch (err) {
@@ -4264,7 +4264,7 @@ async function txdotLoadSingleDistrict(district) {
     txdotRenderList();
     txdotHasLoaded = true;
     if (layersOn.cameras && camMarkerLayer && !map.hasLayer(camMarkerLayer)) camMarkerLayer.addTo(map);
-    txdotFitToCameraBounds();
+    txdotApplyFilter();
     txdotSetLoading('CAMERA LAYER READY', 100, true);
     setTimeout(() => txdotSetLoading('CAMERA LAYER READY', 100, false), 900);
   } catch (err) {
@@ -4275,11 +4275,23 @@ async function txdotLoadSingleDistrict(district) {
   }
 }
 
-function txdotFitToCameraBounds() {
-  const pts = txdotCameras.filter(c => Number.isFinite(Number(c.latitude)) && Number.isFinite(Number(c.longitude))).map(c => [Number(c.latitude), Number(c.longitude)]);
-  if (!pts.length) return;
-  map.fitBounds(pts, { padding:[42,42], maxZoom: txdotCurrentDistrict === 'TX' ? 8 : 10 });
+function txdotCameraLatLng(cam) {
+  const lat = Number(cam.latitude);
+  const lng = Number(cam.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return L.latLng(lat, lng);
 }
+
+function txdotIsCameraInCurrentView(cam) {
+  if (!map) return false;
+  const ll = txdotCameraLatLng(cam);
+  if (!ll) return false;
+  const bounds = map.getBounds();
+  return bounds && bounds.isValid() && bounds.contains(ll);
+}
+
+// Intentionally no-op: loading or changing camera districts should never move/zoom the map.
+function txdotFitToCameraBounds() {}
 
 async function txdotFetchSnapshot(key) {
   const cam = txdotFindCameraByKey(key);
@@ -4329,13 +4341,13 @@ function txdotBuildMarkers() {
     if (!cam.latitude || !cam.longitude) return;
     const key = txdotCameraKey(cam);
     const marker = L.marker([Number(cam.latitude), Number(cam.longitude)], { icon: txdotMakeIcon(cam), zIndexOffset: 250 })
-      .bindPopup(() => txdotBuildPopupHTML(cam), { maxWidth:340, minWidth:270 })
+      .bindPopup(() => txdotBuildPopupHTML(cam), { maxWidth:340, minWidth:270, autoPan:false })
       .on('click', () => {
         txdotSelectedKey = key;
         txdotRenderList();
         if (!txdotSnapshots[key] && !txdotSnapLoading.has(key)) txdotFetchSnapshot(key);
       });
-    if (txdotMatchesFilter(cam, (document.getElementById('cam-search')?.value || '').toLowerCase())) camMarkerLayer.addLayer(marker);
+    if (txdotMatchesFilter(cam, (document.getElementById('cam-search')?.value || '').toLowerCase()) && txdotIsCameraInCurrentView(cam)) camMarkerLayer.addLayer(marker);
     txdotMarkers[key] = { marker, cam };
   });
 }
@@ -4428,7 +4440,7 @@ function txdotApplyFilter() {
   txdotCameras.forEach(cam => {
     const key = txdotCameraKey(cam);
     const entry = txdotMarkers[key];
-    if (entry && txdotMatchesFilter(cam, q)) camMarkerLayer.addLayer(entry.marker);
+    if (entry && txdotMatchesFilter(cam, q) && txdotIsCameraInCurrentView(cam)) camMarkerLayer.addLayer(entry.marker);
   });
   txdotRenderList();
 }
@@ -4451,10 +4463,10 @@ function txdotRenderList() {
     return;
   }
   const q = (document.getElementById('cam-search')?.value || '').toLowerCase();
-  const filtered = txdotCameras.filter(c => txdotMatchesFilter(c, q));
-  if (count) count.textContent = `${filtered.length} of ${txdotCameras.length}`;
+  const filtered = txdotCameras.filter(c => txdotMatchesFilter(c, q) && txdotIsCameraInCurrentView(c));
+  if (count) count.textContent = `${filtered.length} visible of ${txdotCameras.length}`;
   if (!filtered.length) {
-    list.innerHTML = `<div class="cam-empty">${txdotIsLoading ? 'Loading cameras…' : 'No cameras match this filter.'}</div>`;
+    list.innerHTML = `<div class="cam-empty">${txdotIsLoading ? 'Loading cameras…' : 'No cameras in current map view. Pan or zoom the map to reveal nearby cameras.'}</div>`;
     return;
   }
   list.innerHTML = filtered.map(cam => {
@@ -4491,8 +4503,11 @@ function txdotSelectCamera(key) {
   const entry = txdotMarkers[key];
   if (!entry) return;
   const { marker, cam } = entry;
-  if (cam.latitude && cam.longitude) map.setView([Number(cam.latitude), Number(cam.longitude)], Math.max(map.getZoom(), 14), { animate:true });
-  marker.openPopup();
+  // Do not pan or zoom the map from the camera list. The camera layer should behave passively.
+  if (layersOn.cameras && camMarkerLayer && txdotIsCameraInCurrentView(cam) && !camMarkerLayer.hasLayer(marker)) {
+    camMarkerLayer.addLayer(marker);
+  }
+  if (txdotIsCameraInCurrentView(cam)) marker.openPopup();
   txdotRenderList();
   if (!txdotSnapshots[key] && !txdotSnapLoading.has(key)) txdotFetchSnapshot(key);
   setTimeout(() => {
@@ -4535,6 +4550,12 @@ function initTxDotCameraControls() {
   if (search) search.addEventListener('input', txdotApplyFilter);
   const refresh = document.getElementById('cam-refresh');
   if (refresh) refresh.addEventListener('click', () => txdotCurrentDistrict === 'TX' ? txdotLoadDefaultDistricts() : txdotLoadSingleDistrict(txdotCurrentDistrict));
+  if (map && !map._txdotCameraViewportListenerAttached) {
+    map.on('moveend zoomend resize', () => {
+      if (txdotHasLoaded || layersOn.cameras) txdotApplyFilter();
+    });
+    map._txdotCameraViewportListenerAttached = true;
+  }
   txdotUpdateStats();
   txdotRenderList();
   setTxDotCameraLayerButtonState();
@@ -4554,6 +4575,7 @@ function toggleLayer(name) {
     case 'cameras':
       if (on) {
         if (!camMarkerLayer) camMarkerLayer = L.layerGroup();
+        txdotApplyFilter();
         camMarkerLayer.addTo(map);
         ensureTxDotCamerasLoaded();
       } else if (camMarkerLayer && map.hasLayer(camMarkerLayer)) {
