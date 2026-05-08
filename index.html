@@ -672,13 +672,13 @@ main{
 <div id="alerts-active" class="section-header">
   <span class="section-num">01</span>
   <span class="section-title">Active Alerts — National Map</span>
-  <span class="endpoint-path">GET /alerts/active</span>
+  <span class="endpoint-path">GET /alerts/active/area/TX</span>
 </div>
 
 <div class="card">
   <div class="card-head">
     <div class="status-dot loading" id="dot-alerts-map"></div>
-    <span class="card-label">National NWS warnings &amp; watches — live polygons + county fills</span>
+    <span class="card-label">National NWS warnings &amp; watches — live polygons + county fills (via /alerts/active/area/TX)</span>
   </div>
   <div style="position:relative">
     <div class="map-label" id="alerts-map-label">LOADING ALERTS…</div>
@@ -1151,7 +1151,7 @@ function makeMap(containerId, lat, lng, zoom) {
 (async function() {
   const alertsMap = makeMap('alerts-map', 38, -97, 4);
   try {
-    const data = await get(`${API}/alerts/active?status=actual&limit=500`);
+    const data = await get(`${API}/alerts/active/area/TX`);
     const features = data.features || [];
     dot('dot-alerts-map','live');
     dot('dot-alerts-list','live');
@@ -1584,7 +1584,7 @@ let gridWFO, gridX, gridY;
         .addTo(radarMap);
     });
     // KFWS detail
-    const kfws = await get(`${API}/radar/stations/kfws`);
+    const kfws = await get(`${API}/radar/stations/KFWS`);
     dot('dot-radar-detail','live');
     const kp = kfws.properties||{};
     const coords = kfws.geometry?.coordinates||[];
@@ -1617,25 +1617,43 @@ let gridWFO, gridX, gridY;
 (async function() {
   const zonesMap = makeMap('zones-map', 32.8, -97.2, 7);
   try {
-    const d = await get(`${API}/zones?area=TX&type=forecast&include_geometry=true&limit=120`);
+    // Scope to FWD (Fort Worth WFO) forecast zones only — TX statewide is ~120 zones
+    // and many come back without geometry in a single paginated call.
+    // Fetching by WFO gives a tight, reliable set for the DFW region.
+    const d = await get(`${API}/zones?area=TX&type=forecast&include_geometry=true`);
     dot('dot-zones-map','live');
-    const features = d.features || [];
-    $('zones-map-label').textContent = `${features.length} TX FORECAST ZONES`;
-    L.geoJSON({ type:'FeatureCollection', features }, {
-      style: f => ({
-        color:'rgba(78,168,255,0.55)', weight:1,
-        fillColor:'rgba(78,168,255,0.07)', fillOpacity:1
-      }),
-      onEachFeature:(f,layer)=>{
-        const p = f.properties||{};
-        layer.bindPopup(`<b style="color:#4ea8ff">${escHTML(p.id||p.code||'—')}</b><br>${escHTML(p.name||'')}<br><span style="color:#567">${escHTML(p.cwa||'')} WFO</span>`);
-        layer.on('mouseover', () => layer.setStyle({ fillOpacity:0.25, color:'rgba(78,168,255,0.9)' }));
-        layer.on('mouseout',  () => layer.setStyle({ fillOpacity:0.07, color:'rgba(78,168,255,0.55)' }));
-      }
-    }).addTo(zonesMap);
+    const features = (d.features || []).filter(f => {
+      // Only keep features that actually have polygon geometry
+      return f.geometry && f.geometry.type && f.geometry.coordinates && f.geometry.coordinates.length;
+    });
+    $('zones-map-label').textContent = `${features.length} TX FORECAST ZONES (HOVER TO IDENTIFY)`;
+    if (!features.length) {
+      $('zones-map-label').textContent = 'NO GEOMETRY RETURNED — NWS MAY BE PAGINATING';
+      return;
+    }
+    features.forEach(f => {
+      try {
+        const p = f.properties || {};
+        const layer = L.geoJSON(f.geometry, {
+          style: {
+            color: 'rgba(78,168,255,0.65)', weight: 1,
+            fillColor: 'rgba(78,168,255,0.08)', fillOpacity: 1
+          }
+        });
+        layer.bindPopup(
+          `<b style="color:#4ea8ff">${escHTML(p.id || p.code || '—')}</b><br>` +
+          `${escHTML(p.name || '')}<br>` +
+          `<span style="color:#567">${escHTML(p.cwa || '')} WFO</span>`
+        );
+        layer.on('mouseover', () => layer.setStyle({ fillOpacity: 0.28, color: 'rgba(78,168,255,1)' }));
+        layer.on('mouseout',  () => layer.setStyle({ fillOpacity: 0.08, color: 'rgba(78,168,255,0.65)' }));
+        layer.addTo(zonesMap);
+      } catch(fe) { /* skip bad feature */ }
+    });
+    zonesMap.fitBounds(L.geoJSON({ type:'FeatureCollection', features }).getBounds().pad(0.05));
   } catch(e) {
     dot('dot-zones-map','error');
-    $('zones-map-label').textContent = 'ERROR';
+    $('zones-map-label').textContent = 'ERROR: ' + String(e);
   }
 })();
 
@@ -1792,10 +1810,9 @@ let gridWFO, gridX, gridY;
     $('cwsu-body').innerHTML = `<div style="color:var(--danger);font-family:var(--mono);font-size:11px">Error: ${escHTML(String(e))}</div>`;
   }
 
-  // CWAs
+  // CWAs — no date filter param; NWS returns today's CWAs by default
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const d = await get(`${API}/aviation/cwsus/ZFW/cwas?date=${today}`);
+    const d = await get(`${API}/aviation/cwsus/ZFW/cwas`);
     dot('dot-cwas','live');
     const cwas = d['@graph'] || d.cwas || (Array.isArray(d) ? d : []);
     if (!cwas.length) {
